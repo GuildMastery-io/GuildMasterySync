@@ -4,6 +4,7 @@ import * as crypto from 'crypto'
 import chokidar, { FSWatcher } from 'chokidar'
 import axios from 'axios'
 import { getStoreValue, setStoreValue } from './store'
+import { pruneOldSessions, RETENTION_DAYS } from './retention'
 import { BrowserWindow } from 'electron'
 
 let watcher: FSWatcher | null = null
@@ -285,7 +286,26 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
       )
     }
 
-    const hash = crypto.createHash('sha1').update(rawJson).digest('hex')
+    let payload: any
+    try {
+      payload = JSON.parse(rawJson)
+    } catch (e: any) {
+      throw new Error(`Échec du parsing JSON du payload Lua : ${e.message}`)
+    }
+    if (!payload) throw new Error("Unable to parse JSON payload from Lua file.")
+
+    // ── Retention safety-net : drop sessions older than RETENTION_DAYS days
+    // BEFORE hashing and POSTing. Le hash est calculé sur le payload filtré
+    // pour qu'une session qui franchit le seuil entre deux reads déclenche
+    // une re-sync (le serveur reçoit alors un payload sans elle).
+    const { payload: filtered, droppedCount } = pruneOldSessions(payload)
+    if (droppedCount > 0) {
+      log(`[Retention] ${droppedCount} session(s) > ${RETENTION_DAYS} days dropped before send`)
+      payload = filtered
+    }
+
+    const filteredJson = JSON.stringify(payload)
+    const hash = crypto.createHash('sha1').update(filteredJson).digest('hex')
     const prev = lastSyncedHashes.get(filePath) ?? ''
     log(`[processFile] Hash : ${hash.slice(0, 12)}… | précédent : ${prev ? prev.slice(0, 12) + '…' : '(vide)'} | force=${force}`)
 
@@ -297,14 +317,6 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
       })
       return
     }
-
-    let payload: any
-    try {
-      payload = JSON.parse(rawJson)
-    } catch (e: any) {
-      throw new Error(`Échec du parsing JSON du payload Lua : ${e.message}`)
-    }
-    if (!payload) throw new Error("Unable to parse JSON payload from Lua file.")
 
     const sessionCount = Array.isArray(payload.sessions) ? payload.sessions.length : '?'
     const exportTimestamp: string = payload.timestamp ?? 'inconnu'
