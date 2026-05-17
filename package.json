@@ -1,0 +1,77 @@
+{
+  "name": "guildmasterysync",
+  "version": "1.0.0",
+  "description": "Windows companion app that auto-syncs RCLootCouncil_GuildMastery addon data to the GuildMastery web app.",
+  "main": "dist-electron/main.js",
+  "type": "commonjs",
+  "author": "Ged",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://www.guildmastery.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GuildMastery-io/GuildMasterySync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GuildMastery-io/GuildMasterySync/issues"
+  },
+  "keywords": [
+    "wow",
+    "world-of-warcraft",
+    "rclootcouncil",
+    "guildmastery",
+    "electron",
+    "loot",
+    "raid",
+    "sync"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder",
+    "release": "tsc && vite build && electron-builder --publish always",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "io.guildmastery.sync",
+    "productName": "GuildMastery Sync",
+    "icon": "public/logo.png",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "public/logo.png"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "GuildMastery-io",
+      "repo": "GuildMasterySync",
+      "releaseType": "draft",
+      "vPrefixedTagName": true
+    }
+  },
+  "dependencies": {
+    "@mantine/core": "^8.3.16",
+    "@mantine/hooks": "^8.3.16",
+    "@tabler/icons-react": "^3.40.0",
+    "axios": "^1.13.6",
+    "chokidar": "^5.0.0",
+    "electron-store": "^11.0.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "electron": "^41.0.2",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.27.4",
+    "postcss": "^8.5.8",
+    "postcss-preset-mantine": "^1.18.0",
+    "postcss-simple-vars": "^7.0.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  }
+}
