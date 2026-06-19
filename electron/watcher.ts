@@ -3,7 +3,7 @@ import * as path from 'path'
 import * as crypto from 'crypto'
 import chokidar, { FSWatcher } from 'chokidar'
 import axios from 'axios'
-import { getStoreValue, setStoreValue } from './store'
+import { getStoreValue, setStoreValue, type FileSyncState } from './store'
 import { pruneOldSessions, RETENTION_DAYS } from './retention'
 import { BrowserWindow } from 'electron'
 
@@ -65,6 +65,155 @@ function extractSyncPayload(luaContent: string): string | null {
   const tail = line.slice(eqIdx + 3).trimEnd()
   const body = tail.endsWith('",') ? tail.slice(0, -2) : tail.endsWith('"') ? tail.slice(0, -1) : tail
   return unescapeLuaString(body)
+}
+
+// ── Incremental sync (v2) ───────────────────────────────────────────
+const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000 // manifest safety net, once per day
+
+interface V2Session {
+  id?: string
+  session?: number
+  item_id?: number
+  looted_at?: number
+  updated_at?: number
+  [k: string]: unknown
+}
+
+/** Stable per-entry identity. SHARED formula with the server and the addon:
+ *  `${looted_at}_${session}_${item_id}`. The v2 addon already provides `id`. */
+function entryIdOf(s: V2Session): string {
+  if (typeof s.id === 'string' && s.id.length > 0) return s.id
+  const looted = typeof s.looted_at === 'number' && s.looted_at > 0 ? s.looted_at : 0
+  return `${looted}_${s.session ?? 0}_${s.item_id ?? 0}`
+}
+
+/** Per-entry content hash — MUST match the server
+ *  (`computeEntryHash`: sha256(JSON.stringify(s)).slice(0,16)). */
+function entryHashOf(s: V2Session): string {
+  return crypto.createHash('sha256').update(JSON.stringify(s)).digest('hex').slice(0, 16)
+}
+
+/** Detects a v2 (incremental sync) payload. */
+function isV2Payload(payload: any): boolean {
+  if (payload?.version && parseInt(String(payload.version), 10) >= 2) return true
+  return Array.isArray(payload?.sessions) && payload.sessions.some((s: any) => typeof s?.id === 'string')
+}
+
+/**
+ * Incremental sync of a v2 payload.
+ *  - Manifest safety net (startup + once per day, or `force`): GET the server
+ *    manifest; on drift → full reconcile (is_full_sync), otherwise nothing.
+ *  - Otherwise: delta — only sends entries whose hash differs from the acked one.
+ * State (acked hashes + last reconcile) is persisted per file.
+ */
+async function processV2(filePath: string, win: BrowserWindow, payload: any, force: boolean) {
+  const apiUrl = validateApiUrl(getStoreValue('apiUrl'))
+  const apiKey = getStoreValue('apiKey')
+  if (!apiUrl) throw new Error('Invalid API URL — must start with http:// or https://')
+  if (!apiKey) throw new Error('Missing API key — set it in the configuration.')
+
+  const sessions: V2Session[] = Array.isArray(payload.sessions) ? payload.sessions : []
+
+  // Local map id → { hash, session } (plain object: no Map iteration)
+  const current: Record<string, { hash: string; session: V2Session }> = {}
+  for (const s of sessions) current[entryIdOf(s)] = { hash: entryHashOf(s), session: s }
+
+  const allState = (getStoreValue('syncState') ?? {}) as Record<string, FileSyncState>
+  const st: FileSyncState = allState[filePath] ?? { ackedHashes: {}, lastReconcile: 0 }
+
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+  const reconcileNeeded = force || (Date.now() - st.lastReconcile > RECONCILE_INTERVAL_MS)
+
+  // ── Safety net: manifest reconciliation ────────────────────────────
+  if (reconcileNeeded) {
+    log(`[processV2] Manifest reconciliation (${sessions.length} local entries)…`)
+    const manRes = await axios.get(`${apiUrl}/api/loot-sessions/manifest`, { headers, timeout: 30000 })
+    const serverManifest: Record<string, string> = manRes.data?.entries ?? {}
+
+    // Drift = a local entry missing/hash-mismatched on the server, OR a server orphan.
+    let drift = false
+    for (const [id, { hash }] of Object.entries(current)) {
+      if (serverManifest[id] !== hash) { drift = true; break }
+    }
+    if (!drift) {
+      for (const id of Object.keys(serverManifest)) {
+        if (!(id in current)) { drift = true; break }
+      }
+    }
+
+    if (drift) {
+      log(`[processV2] Drift detected → full reconcile (is_full_sync).`)
+      const res = await axios.post(
+        `${apiUrl}/api/loot-sessions`,
+        { ...payload, version: '2', is_full_sync: true },
+        { headers, timeout: 30000 },
+      )
+      assertJson(res)
+    } else {
+      log(`[processV2] No drift — already in sync with the server.`)
+    }
+
+    // State aligned to the current local state.
+    const ackedHashes: Record<string, string> = {}
+    for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+    allState[filePath] = { ackedHashes, lastReconcile: Date.now() }
+    setStoreValue('syncState', allState)
+    finishOk(win, sessions.length, payload, drift ? 'reconcile' : 'noop')
+    return
+  }
+
+  // ── Delta: only changed entries ────────────────────────────────────
+  const changed: V2Session[] = []
+  for (const [id, { hash, session }] of Object.entries(current)) {
+    if (st.ackedHashes[id] !== hash) changed.push(session)
+  }
+
+  if (changed.length === 0) {
+    log('[processV2] No changed entry — nothing to send.')
+    win.webContents.send('sync-status', { status: 'watching', message: 'No new data (already synced).' })
+    return
+  }
+
+  log(`[processV2] Delta: ${changed.length}/${sessions.length} changed entry(ies) → upsert.`)
+  const res = await axios.post(
+    `${apiUrl}/api/loot-sessions`,
+    { version: '2', timestamp: payload.timestamp, is_full_sync: false, sessions: changed },
+    { headers, timeout: 30000 },
+  )
+  assertJson(res)
+
+  // Acknowledge sent entries + drop ids that disappeared locally (180d prune).
+  const ackedHashes: Record<string, string> = {}
+  for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+  allState[filePath] = { ackedHashes, lastReconcile: st.lastReconcile }
+  setStoreValue('syncState', allState)
+  finishOk(win, changed.length, payload, 'delta')
+}
+
+/** Ensures an axios response is application JSON (guards against HTML middleware). */
+function assertJson(res: any) {
+  const contentType = res.headers?.['content-type'] ?? ''
+  if (!contentType.includes('application/json') || typeof res.data !== 'object' || res.data === null) {
+    throw new Error(`The server responded with non-JSON (HTTP ${res.status}).`)
+  }
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`HTTP ${res.status} — ${JSON.stringify(res.data)}`)
+  }
+}
+
+/** Notifies the renderer of a successful v2 sync + updates lastSync. */
+function finishOk(win: BrowserWindow, count: number, payload: any, mode: 'delta' | 'reconcile' | 'noop') {
+  const time = new Date().toLocaleString()
+  setStoreValue('lastSync', time)
+  const label =
+    mode === 'delta' ? `${count} vote(s) synced (delta)`
+    : mode === 'reconcile' ? `Full reconcile (${count} vote(s))`
+    : `Already synced (${count} vote(s))`
+  log(`[processV2] ✅ ${label}`)
+  win.webContents.send('sync-status', {
+    status: 'success', message: label, time,
+    sessionCount: count, exportTimestamp: payload.timestamp ?? 'unknown', duplicate: false,
+  })
 }
 
 export function startWatching(win: BrowserWindow) {
@@ -302,6 +451,16 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
     if (droppedCount > 0) {
       log(`[Retention] ${droppedCount} session(s) > ${RETENTION_DAYS} days dropped before send`)
       payload = filtered
+    }
+
+    // ── Incremental sync v2 (addon >= v2) ─────────────────────────────
+    // A v2 payload carries a stable `id` per entry → only the delta is sent
+    // (plus a manifest reconciliation safety net). The v1 path below stays
+    // intact for addons that are not upgraded yet.
+    if (isV2Payload(payload)) {
+      win.webContents.send('sync-status', { status: 'syncing', message: 'Incremental sync…' })
+      await processV2(filePath, win, payload, force)
+      return
     }
 
     const filteredJson = JSON.stringify(payload)
