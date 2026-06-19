@@ -43,7 +43,7 @@ export default function App() {
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     status: 'waiting',
-    message: 'Initialisation…',
+    message: 'Initializing…',
   })
 
   const [saveSuccess, setSaveSuccess] = useState(false)
@@ -64,7 +64,7 @@ export default function App() {
     setChecking(true)
     checkTimerRef.current = setTimeout(async () => {
       if (!s.apiUrl) {
-        setServerStatus({ ok: false, message: 'Aucune URL renseignée' })
+        setServerStatus({ ok: false, message: 'No URL provided' })
         setApiKeyStatus({ ok: null, message: '' })
         setChecking(false)
         return
@@ -197,7 +197,7 @@ export default function App() {
         {saveSuccess && (
           <Badge color="teal" variant="light" size="lg"
             style={{ position: 'fixed', top: 56, right: 20, zIndex: 99 }}>
-            ✓ Sauvegardé
+            ✓ Saved
           </Badge>
         )}
 
@@ -207,7 +207,7 @@ export default function App() {
           <Group justify="space-between" align="center">
             <div>
               <Title order={4} c="white">GuildMastery Companion</Title>
-              <Text size="sm" c="dimmed" mt={4}>Synchronisation automatique de vos données RCLootCouncil</Text>
+              <Text size="sm" c="dimmed" mt={4}>Automatic sync of your RCLootCouncil data</Text>
             </div>
             <Badge
               size="lg"
@@ -228,16 +228,16 @@ export default function App() {
               }
             >
               {checking
-                ? 'Vérification…'
+                ? 'Checking…'
                 : configured
-                  ? 'Actif'
+                  ? 'Active'
                   : serverStatus.ok === false
-                    ? 'Serveur inaccessible'
+                    ? 'Server unreachable'
                     : apiKeyStatus.ok === false
-                      ? 'Clé API invalide'
+                      ? 'Invalid API key'
                       : apiKeyStatus.ok === null && serverStatus.ok === true
-                        ? 'Clé non vérifiable'
-                        : 'Configuration requise'}
+                        ? 'Key not verifiable'
+                        : 'Configuration required'}
             </Badge>
           </Group>
         </Card>
@@ -258,10 +258,10 @@ export default function App() {
                   <Text fw={600} size="sm" c="white">RCLootCouncil Integration</Text>
                 </Group>
                 <Badge size="sm" color={statusColor} variant="dot">
-                  {syncStatus.status === 'success'   ? 'Synchronisé' :
-                   syncStatus.status === 'duplicate' ? 'Doublon' :
-                   syncStatus.status === 'error'     ? 'Erreur' :
-                   syncing ? 'Synchro…' : 'En attente'}
+                  {syncStatus.status === 'success'   ? 'Synced' :
+                   syncStatus.status === 'duplicate' ? 'Duplicate' :
+                   syncStatus.status === 'error'     ? 'Error' :
+                   syncing ? 'Syncing…' : 'Idle'}
                 </Badge>
               </Group>
             </Box>
@@ -272,14 +272,14 @@ export default function App() {
               <Card bg="#1a1b1e" radius="sm" p="sm"
                 style={{ border: '1px solid #2c2e33' }}>
                 <Group justify="space-between" mb={6}>
-                  <Text size="sm" c="white" fw={500}>Synchronisation des loots & votes</Text>
-                  <Tooltip label="Relancer la synchro">
+                  <Text size="sm" c="white" fw={500}>Loot & vote sync</Text>
+                  <Tooltip label="Re-run sync">
                     <ActionIcon
                       variant="subtle"
                       color="gray"
                       size="sm"
                       onClick={() => {
-                        setSyncStatus({ status: 'syncing', message: 'Synchronisation manuelle…' })
+                        setSyncStatus({ status: 'syncing', message: 'Manual sync…' })
                         void window.api.forceSync()
                       }}
                       disabled={!configured || syncing}
@@ -290,14 +290,14 @@ export default function App() {
                 </Group>
                 <Text size="xs" c="dimmed" lh={1.6}>
                   {configured
-                    ? "L'application surveille votre dossier WoW. Effectuez un /reload en jeu pour déclencher la synchronisation."
-                    : 'Configurez votre dossier WoW et votre clé API dans le panneau de droite pour commencer.'}
+                    ? 'The app is watching your WoW folder. Do a /reload in game to trigger a sync.'
+                    : 'Configure your WoW folder and API key in the right panel to get started.'}
                 </Text>
                 <Divider my="xs" color="#2c2e33" />
                 <Group gap={4}>
-                  <Text size="xs" c="dimmed">Dernière synchro :</Text>
+                  <Text size="xs" c="dimmed">Last sync:</Text>
                   <Text size="xs" c={settings.lastSync ? 'teal' : 'dimmed'} fw={500}>
-                    {settings.lastSync || 'Aucune'}
+                    {settings.lastSync || 'None'}
                   </Text>
                 </Group>
                 {(syncStatus.status === 'success' || syncStatus.status === 'duplicate') && (
@@ -306,7 +306,7 @@ export default function App() {
                       <Text size="xs" c="dimmed">
                         {syncStatus.sessionCount} vote(s)
                         {syncStatus.status === 'duplicate' && (
-                          <Text span c="orange"> · déjà connu du serveur</Text>
+                          <Text span c="orange"> · already known by the server</Text>
                         )}
                       </Text>
                     )}
@@ -326,7 +326,7 @@ export default function App() {
               <Card bg="#1a1b1e" radius="sm" p="sm"
                 style={{ border: '1px solid #2c2e33' }}>
                 <Group justify="space-between" mb={8}>
-                  <Text size="sm" c="white" fw={500}>Connexion Serveur</Text>
+                  <Text size="sm" c="white" fw={500}>Server Connection</Text>
                   <ThemeIcon variant="light" size="sm" radius="xl"
                     color={configured ? 'teal' : 'gray'}>
                     <IconPlugConnected size={14} />
@@ -339,7 +339,7 @@ export default function App() {
                     {checking ? <IconClock size={11} /> : serverStatus.ok === true ? <IconCheck size={11} /> : serverStatus.ok === false ? <IconWifi size={11} /> : <IconClock size={11} />}
                   </ThemeIcon>
                   <Text size="xs" c="dimmed" style={{ flex: 1 }}>
-                    Serveur :{' '}
+                    Server:{' '}
                     <Text span ff="monospace" size="xs" c="white">{settings.apiUrl || '—'}</Text>
                   </Text>
                 </Group>
@@ -358,7 +358,7 @@ export default function App() {
                     {apiKeyStatus.ok === true ? <IconCheck size={11} /> : <IconKey size={11} />}
                   </ThemeIcon>
                   <div>
-                    <Text size="xs" c="dimmed">Clé API</Text>
+                    <Text size="xs" c="dimmed">API Key</Text>
                     {!checking && apiKeyStatus.message && (
                       <Text size="xs"
                         c={
@@ -394,14 +394,14 @@ export default function App() {
                 <Card bg="rgba(34, 139, 230, .08)" radius="sm" p="sm"
                   style={{ border: '1px solid rgba(34,139,230,.2)' }}>
                   <Text size="xs" c="blue.4" lh={1.6}>
-                    Renseignez votre dossier World of Warcraft et votre clé API pour démarrer.
+                    Enter your World of Warcraft folder and API key to get started.
                   </Text>
                 </Card>
               )}
 
               {/* WoW Folder */}
               <div>
-                <Text size="xs" fw={500} c="dimmed" mb={6}>Dossier World of Warcraft</Text>
+                <Text size="xs" fw={500} c="dimmed" mb={6}>World of Warcraft folder</Text>
                 <Button
                   variant="default"
                   fullWidth
@@ -414,19 +414,19 @@ export default function App() {
                     inner: { justifyContent: 'flex-start' },
                   }}
                 >
-                  {settings.wowPath || 'Non configuré – Parcourir…'}
+                  {settings.wowPath || 'Not configured – Browse…'}
                 </Button>
                 {settings.wowPath && (
                   <Group gap={4} mt={4}>
                     <IconCheck size={12} color="#40c057" />
-                    <Text size="xs" c="teal">Dossier détecté</Text>
+                    <Text size="xs" c="teal">Folder detected</Text>
                   </Group>
                 )}
               </div>
 
               {/* API Key */}
               <PasswordInput
-                label="Clé API"
+                label="API Key"
                 placeholder="gm_live_••••••••••••••••••••••••"
                 value={settings.apiKey}
                 onChange={e => update({ ...settings, apiKey: e.currentTarget.value })}
@@ -440,8 +440,8 @@ export default function App() {
 
               {/* API Endpoint */}
               <TextInput
-                label="Point d'accès API"
-                description="ex: https://guildmastery.io"
+                label="API Endpoint"
+                description="e.g. https://guildmastery.io"
                 placeholder="https://guildmastery.io"
                 value={settings.apiUrl}
                 onChange={e => update({ ...settings, apiUrl: e.currentTarget.value })}
@@ -460,13 +460,13 @@ export default function App() {
         {/* ─── Log Panel ─── */}
         <Box mt="md">
           <Group justify="space-between" mb={4}>
-            <Text size="xs" fw={500} c="dimmed">Logs de synchronisation</Text>
+            <Text size="xs" fw={500} c="dimmed">Sync logs</Text>
             <Text
               size="xs" c="dimmed"
               style={{ cursor: 'pointer', textDecoration: 'underline' }}
               onClick={() => setLogs([])}
             >
-              Effacer
+              Clear
             </Text>
           </Group>
           <Box
@@ -484,13 +484,13 @@ export default function App() {
             }}
           >
             {logs.length === 0
-              ? <Text size="xs" c="dimmed" ff="monospace">En attente de logs…</Text>
+              ? <Text size="xs" c="dimmed" ff="monospace">Waiting for logs…</Text>
               : logs.map((line, i) => (
                 <div key={i} style={{
                   color: line.includes('❌') ? '#ff6b6b'
                        : line.includes('✅') ? '#69db7c'
                        : line.includes('⚠️') ? '#ffa94d'
-                       : line.includes('Réponse serveur') ? '#74c0fc'
+                       : line.includes('Server response') ? '#74c0fc'
                        : '#909296',
                   lineHeight: 1.5,
                   whiteSpace: 'pre-wrap',

@@ -3,7 +3,7 @@ import * as path from 'path'
 import * as crypto from 'crypto'
 import chokidar, { FSWatcher } from 'chokidar'
 import axios from 'axios'
-import { getStoreValue, setStoreValue } from './store'
+import { getStoreValue, setStoreValue, type FileSyncState } from './store'
 import { pruneOldSessions, RETENTION_DAYS } from './retention'
 import { BrowserWindow } from 'electron'
 
@@ -67,6 +67,155 @@ function extractSyncPayload(luaContent: string): string | null {
   return unescapeLuaString(body)
 }
 
+// ── Incremental sync (v2) ───────────────────────────────────────────
+const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000 // manifest safety net, once per day
+
+interface V2Session {
+  id?: string
+  session?: number
+  item_id?: number
+  looted_at?: number
+  updated_at?: number
+  [k: string]: unknown
+}
+
+/** Stable per-entry identity. SHARED formula with the server and the addon:
+ *  `${looted_at}_${session}_${item_id}`. The v2 addon already provides `id`. */
+function entryIdOf(s: V2Session): string {
+  if (typeof s.id === 'string' && s.id.length > 0) return s.id
+  const looted = typeof s.looted_at === 'number' && s.looted_at > 0 ? s.looted_at : 0
+  return `${looted}_${s.session ?? 0}_${s.item_id ?? 0}`
+}
+
+/** Per-entry content hash — MUST match the server
+ *  (`computeEntryHash`: sha256(JSON.stringify(s)).slice(0,16)). */
+function entryHashOf(s: V2Session): string {
+  return crypto.createHash('sha256').update(JSON.stringify(s)).digest('hex').slice(0, 16)
+}
+
+/** Detects a v2 (incremental sync) payload. */
+function isV2Payload(payload: any): boolean {
+  if (payload?.version && parseInt(String(payload.version), 10) >= 2) return true
+  return Array.isArray(payload?.sessions) && payload.sessions.some((s: any) => typeof s?.id === 'string')
+}
+
+/**
+ * Incremental sync of a v2 payload.
+ *  - Manifest safety net (startup + once per day, or `force`): GET the server
+ *    manifest; on drift → full reconcile (is_full_sync), otherwise nothing.
+ *  - Otherwise: delta — only sends entries whose hash differs from the acked one.
+ * State (acked hashes + last reconcile) is persisted per file.
+ */
+async function processV2(filePath: string, win: BrowserWindow, payload: any, force: boolean) {
+  const apiUrl = validateApiUrl(getStoreValue('apiUrl'))
+  const apiKey = getStoreValue('apiKey')
+  if (!apiUrl) throw new Error('Invalid API URL — must start with http:// or https://')
+  if (!apiKey) throw new Error('Missing API key — set it in the configuration.')
+
+  const sessions: V2Session[] = Array.isArray(payload.sessions) ? payload.sessions : []
+
+  // Local map id → { hash, session } (plain object: no Map iteration)
+  const current: Record<string, { hash: string; session: V2Session }> = {}
+  for (const s of sessions) current[entryIdOf(s)] = { hash: entryHashOf(s), session: s }
+
+  const allState = (getStoreValue('syncState') ?? {}) as Record<string, FileSyncState>
+  const st: FileSyncState = allState[filePath] ?? { ackedHashes: {}, lastReconcile: 0 }
+
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+  const reconcileNeeded = force || (Date.now() - st.lastReconcile > RECONCILE_INTERVAL_MS)
+
+  // ── Safety net: manifest reconciliation ────────────────────────────
+  if (reconcileNeeded) {
+    log(`[processV2] Manifest reconciliation (${sessions.length} local entries)…`)
+    const manRes = await axios.get(`${apiUrl}/api/loot-sessions/manifest`, { headers, timeout: 30000 })
+    const serverManifest: Record<string, string> = manRes.data?.entries ?? {}
+
+    // Drift = a local entry missing/hash-mismatched on the server, OR a server orphan.
+    let drift = false
+    for (const [id, { hash }] of Object.entries(current)) {
+      if (serverManifest[id] !== hash) { drift = true; break }
+    }
+    if (!drift) {
+      for (const id of Object.keys(serverManifest)) {
+        if (!(id in current)) { drift = true; break }
+      }
+    }
+
+    if (drift) {
+      log(`[processV2] Drift detected → full reconcile (is_full_sync).`)
+      const res = await axios.post(
+        `${apiUrl}/api/loot-sessions`,
+        { ...payload, version: '2', is_full_sync: true },
+        { headers, timeout: 30000 },
+      )
+      assertJson(res)
+    } else {
+      log(`[processV2] No drift — already in sync with the server.`)
+    }
+
+    // State aligned to the current local state.
+    const ackedHashes: Record<string, string> = {}
+    for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+    allState[filePath] = { ackedHashes, lastReconcile: Date.now() }
+    setStoreValue('syncState', allState)
+    finishOk(win, sessions.length, payload, drift ? 'reconcile' : 'noop')
+    return
+  }
+
+  // ── Delta: only changed entries ────────────────────────────────────
+  const changed: V2Session[] = []
+  for (const [id, { hash, session }] of Object.entries(current)) {
+    if (st.ackedHashes[id] !== hash) changed.push(session)
+  }
+
+  if (changed.length === 0) {
+    log('[processV2] No changed entry — nothing to send.')
+    win.webContents.send('sync-status', { status: 'watching', message: 'No new data (already synced).' })
+    return
+  }
+
+  log(`[processV2] Delta: ${changed.length}/${sessions.length} changed entry(ies) → upsert.`)
+  const res = await axios.post(
+    `${apiUrl}/api/loot-sessions`,
+    { version: '2', timestamp: payload.timestamp, is_full_sync: false, sessions: changed },
+    { headers, timeout: 30000 },
+  )
+  assertJson(res)
+
+  // Acknowledge sent entries + drop ids that disappeared locally (180d prune).
+  const ackedHashes: Record<string, string> = {}
+  for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+  allState[filePath] = { ackedHashes, lastReconcile: st.lastReconcile }
+  setStoreValue('syncState', allState)
+  finishOk(win, changed.length, payload, 'delta')
+}
+
+/** Ensures an axios response is application JSON (guards against HTML middleware). */
+function assertJson(res: any) {
+  const contentType = res.headers?.['content-type'] ?? ''
+  if (!contentType.includes('application/json') || typeof res.data !== 'object' || res.data === null) {
+    throw new Error(`The server responded with non-JSON (HTTP ${res.status}).`)
+  }
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`HTTP ${res.status} — ${JSON.stringify(res.data)}`)
+  }
+}
+
+/** Notifies the renderer of a successful v2 sync + updates lastSync. */
+function finishOk(win: BrowserWindow, count: number, payload: any, mode: 'delta' | 'reconcile' | 'noop') {
+  const time = new Date().toLocaleString()
+  setStoreValue('lastSync', time)
+  const label =
+    mode === 'delta' ? `${count} vote(s) synced (delta)`
+    : mode === 'reconcile' ? `Full reconcile (${count} vote(s))`
+    : `Already synced (${count} vote(s))`
+  log(`[processV2] ✅ ${label}`)
+  win.webContents.send('sync-status', {
+    status: 'success', message: label, time,
+    sessionCount: count, exportTimestamp: payload.timestamp ?? 'unknown', duplicate: false,
+  })
+}
+
 export function startWatching(win: BrowserWindow) {
   _logWin = win
   const wowPath = getStoreValue('wowPath')
@@ -84,7 +233,7 @@ export function startWatching(win: BrowserWindow) {
   if (watcher) { watcher.close(); watcher = null }
 
   const targetFilePattern = path.join(wowPath, 'WTF', 'Account', '**', 'SavedVariables', 'RCLootCouncil_GuildMastery.lua')
-  log(`[Watcher] Démarrage surveillance : ${targetFilePattern}`)
+  log(`[Watcher] Starting watch: ${targetFilePattern}`)
 
   watcher = chokidar.watch(targetFilePattern, {
     persistent: true,
@@ -94,15 +243,15 @@ export function startWatching(win: BrowserWindow) {
   watchedPath = wowPath
 
   watcher.on('add', (filePath: string) => {
-    log(`[Watcher] Fichier détecté (add) : ${filePath}`)
+    log(`[Watcher] File detected (add): ${filePath}`)
     void processFile(filePath, win)
   })
   watcher.on('change', (filePath: string) => {
-    log(`[Watcher] Fichier modifié (change) : ${filePath}`)
+    log(`[Watcher] File changed (change): ${filePath}`)
     void processFile(filePath, win)
   })
 
-  win.webContents.send('sync-status', { status: 'watching', message: 'En attente de données...' })
+  win.webContents.send('sync-status', { status: 'watching', message: 'Waiting for data...' })
 }
 
 export function stopWatching() {
@@ -115,32 +264,32 @@ export function stopWatching() {
 
 export interface ConnectionResult {
   server: { ok: boolean; message: string }
-  /** null = non testé car serveur inaccessible */
+  /** null = not tested because the server is unreachable */
   apiKey: { ok: boolean | null; message: string }
 }
 
 function networkErrorMessage(err: any): string {
   const code: string = err.code ?? ''
-  if (code === 'ENOTFOUND')    return `Adresse introuvable — vérifiez l'URL`
-  if (code === 'ECONNREFUSED') return 'Connexion refusée — serveur hors ligne ou mauvais port'
-  if (code === 'ECONNRESET')   return 'Connexion interrompue par le serveur'
+  if (code === 'ENOTFOUND')    return `Address not found — check the URL`
+  if (code === 'ECONNREFUSED') return 'Connection refused — server offline or wrong port'
+  if (code === 'ECONNRESET')   return 'Connection reset by the server'
   if (code === 'ECONNABORTED' || code === 'ETIMEDOUT' || err.message?.includes('timeout'))
-                               return 'Délai dépassé — serveur inaccessible ou trop lent'
+                               return 'Timed out — server unreachable or too slow'
   if (code?.startsWith('CERT') || code === 'ERR_TLS_CERT_ALTNAME_INVALID')
-                               return "Erreur de certificat SSL — vérifiez l'URL (http vs https)"
-  return `Impossible de joindre le serveur (${err.message ?? 'erreur inconnue'})`
+                               return "SSL certificate error — check the URL (http vs https)"
+  return `Unable to reach the server (${err.message ?? 'unknown error'})`
 }
 
 export async function testConnection(apiUrl: string, apiKey: string): Promise<ConnectionResult> {
   const normalized = validateApiUrl(apiUrl)
   if (!normalized) {
     return {
-      server: { ok: false, message: 'URL invalide — doit commencer par http:// ou https://' },
-      apiKey: { ok: null,  message: 'Non testé — URL invalide' },
+      server: { ok: false, message: 'Invalid URL — must start with http:// or https://' },
+      apiKey: { ok: null,  message: 'Not tested — invalid URL' },
     }
   }
 
-  // ── Passe 1 : joignabilité du serveur (sans clé) ──────────────
+  // ── Pass 1: server reachability (without key) ──────────────────
   let serverOk = false
   let serverMsg = ''
   try {
@@ -150,9 +299,9 @@ export async function testConnection(apiUrl: string, apiKey: string): Promise<Co
     })
     if (res.status < 500) {
       serverOk = true
-      serverMsg = 'Serveur joignable'
+      serverMsg = 'Server reachable'
     } else {
-      serverMsg = `Erreur interne du serveur (HTTP ${res.status})`
+      serverMsg = `Internal server error (HTTP ${res.status})`
     }
   } catch (err: any) {
     serverMsg = networkErrorMessage(err)
@@ -161,15 +310,15 @@ export async function testConnection(apiUrl: string, apiKey: string): Promise<Co
   if (!serverOk) {
     return {
       server: { ok: false, message: serverMsg },
-      apiKey: { ok: null,  message: 'Non testé — serveur inaccessible' },
+      apiKey: { ok: null,  message: 'Not tested — server unreachable' },
     }
   }
 
-  // ── Passe 2 : validité de la clé API ─────────────────────────
+  // ── Pass 2: API key validity ───────────────────────────────────
   if (!apiKey) {
     return {
       server: { ok: true, message: serverMsg },
-      apiKey: { ok: false, message: 'Aucune clé API renseignée' },
+      apiKey: { ok: false, message: 'No API key provided' },
     }
   }
 
@@ -182,7 +331,7 @@ export async function testConnection(apiUrl: string, apiKey: string): Promise<Co
     if (res.status === 401 || res.status === 403) {
       return {
         server: { ok: true,  message: serverMsg },
-        apiKey: { ok: false, message: 'Clé API invalide ou non autorisée' },
+        apiKey: { ok: false, message: 'Invalid or unauthorized API key' },
       }
     }
     if (res.status === 200 || res.status === 204) {
@@ -191,39 +340,39 @@ export async function testConnection(apiUrl: string, apiKey: string): Promise<Co
         const label = body.guildName ?? `#${body.guildId}`
         return {
           server: { ok: true, message: serverMsg },
-          apiKey: { ok: true, message: `Clé API valide — ${label}` },
+          apiKey: { ok: true, message: `Valid API key — ${label}` },
         }
       }
       return {
         server: { ok: true, message: serverMsg },
-        apiKey: { ok: null, message: "Serveur joignable mais validation de clé non supportée — mettez à jour le serveur" },
+        apiKey: { ok: null, message: "Server reachable but key validation not supported — update the server" },
       }
     }
     return {
       server: { ok: true,  message: serverMsg },
-      apiKey: { ok: false, message: `Réponse inattendue lors de la validation (HTTP ${res.status})` },
+      apiKey: { ok: false, message: `Unexpected response during validation (HTTP ${res.status})` },
     }
   } catch (err: any) {
     return {
       server: { ok: true,  message: serverMsg },
-      apiKey: { ok: false, message: `Erreur lors de la validation de la clé (${err.message ?? ''})` },
+      apiKey: { ok: false, message: `Error while validating the key (${err.message ?? ''})` },
     }
   }
 }
 
-/** Scanne les fichiers SavedVariables et les synchronise.
- *  Si force=false (défaut pour la détection auto), la synchro n'a lieu que si le contenu a changé (hash par fichier). */
+/** Scans the SavedVariables files and syncs them.
+ *  If force=false (default for auto-detection), the sync only runs when the content changed (per-file hash). */
 export async function forceSync(win: BrowserWindow, force = true) {
   _logWin = win
   const wowPath = getStoreValue('wowPath')
   if (!wowPath || !fs.existsSync(wowPath)) {
-    win.webContents.send('sync-status', { status: 'error', message: 'Chemin WoW invalide' })
+    win.webContents.send('sync-status', { status: 'error', message: 'Invalid WoW path' })
     return
   }
 
   const wtfPath = path.join(wowPath, 'WTF', 'Account')
   if (!fs.existsSync(wtfPath)) {
-    win.webContents.send('sync-status', { status: 'error', message: `Dossier WTF/Account introuvable dans ${wowPath}` })
+    win.webContents.send('sync-status', { status: 'error', message: `WTF/Account folder not found in ${wowPath}` })
     return
   }
 
@@ -243,19 +392,19 @@ export async function forceSync(win: BrowserWindow, force = true) {
   }
   findLuaFiles(wtfPath)
 
-  log(`[forceSync] force=${force} — ${luaFiles.length} fichier(s) trouvé(s)`)
+  log(`[forceSync] force=${force} — ${luaFiles.length} file(s) found`)
 
   if (luaFiles.length === 0) {
     win.webContents.send('sync-status', {
       status: 'error',
-      message: 'Aucun fichier RCLootCouncil_GuildMastery.lua trouvé dans WTF/Account/*/SavedVariables/',
+      message: 'No RCLootCouncil_GuildMastery.lua file found in WTF/Account/*/SavedVariables/',
     })
     return
   }
 
   win.webContents.send('sync-status', {
     status: 'syncing',
-    message: `${luaFiles.length} fichier(s) trouvé(s), synchronisation en cours…`,
+    message: `${luaFiles.length} file(s) found, syncing…`,
   })
 
   for (const file of luaFiles) {
@@ -266,23 +415,23 @@ export async function forceSync(win: BrowserWindow, force = true) {
 async function processFile(filePath: string, win: BrowserWindow, force = false) {
   // Mutex per file — silently skip if a sync is already in flight for this file.
   if (inFlight.has(filePath)) {
-    log(`[processFile] Synchro déjà en cours pour ${path.basename(filePath)} — skip.`)
+    log(`[processFile] Sync already in flight for ${path.basename(filePath)} — skip.`)
     return
   }
   inFlight.add(filePath)
 
   try {
     const fileStats = fs.statSync(filePath)
-    log(`[processFile] Lecture : ${path.basename(filePath)} (${fileStats.size} octets, modifié : ${fileStats.mtime.toLocaleString()})`)
+    log(`[processFile] Reading: ${path.basename(filePath)} (${fileStats.size} bytes, modified: ${fileStats.mtime.toLocaleString()})`)
 
-    win.webContents.send('sync-status', { status: 'syncing', message: 'Nouvelles données détectées ! Synchronisation...' })
+    win.webContents.send('sync-status', { status: 'syncing', message: 'New data detected! Syncing...' })
 
     const luaContent = fs.readFileSync(filePath, 'utf-8')
     const rawJson = extractSyncPayload(luaContent)
     if (!rawJson) {
       throw new Error(
-        "Aucun historique complet (syncPayload) trouvé dans le fichier Lua.\n" +
-        "Connecte-toi en jeu ou fais un /reload pour forcer la génération."
+        "No full history (syncPayload) found in the Lua file.\n" +
+        "Log in to the game or run a /reload to force generation."
       )
     }
 
@@ -290,36 +439,46 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
     try {
       payload = JSON.parse(rawJson)
     } catch (e: any) {
-      throw new Error(`Échec du parsing JSON du payload Lua : ${e.message}`)
+      throw new Error(`Failed to parse the Lua payload JSON: ${e.message}`)
     }
     if (!payload) throw new Error("Unable to parse JSON payload from Lua file.")
 
-    // ── Retention safety-net : drop sessions older than RETENTION_DAYS days
-    // BEFORE hashing and POSTing. Le hash est calculé sur le payload filtré
-    // pour qu'une session qui franchit le seuil entre deux reads déclenche
-    // une re-sync (le serveur reçoit alors un payload sans elle).
+    // ── Retention safety-net: drop sessions older than RETENTION_DAYS days
+    // BEFORE hashing and POSTing. The hash is computed on the filtered payload
+    // so that a session crossing the threshold between two reads triggers a
+    // re-sync (the server then receives a payload without it).
     const { payload: filtered, droppedCount } = pruneOldSessions(payload)
     if (droppedCount > 0) {
       log(`[Retention] ${droppedCount} session(s) > ${RETENTION_DAYS} days dropped before send`)
       payload = filtered
     }
 
+    // ── Incremental sync v2 (addon >= v2) ─────────────────────────────
+    // A v2 payload carries a stable `id` per entry → only the delta is sent
+    // (plus a manifest reconciliation safety net). The v1 path below stays
+    // intact for addons that are not upgraded yet.
+    if (isV2Payload(payload)) {
+      win.webContents.send('sync-status', { status: 'syncing', message: 'Incremental sync…' })
+      await processV2(filePath, win, payload, force)
+      return
+    }
+
     const filteredJson = JSON.stringify(payload)
     const hash = crypto.createHash('sha1').update(filteredJson).digest('hex')
     const prev = lastSyncedHashes.get(filePath) ?? ''
-    log(`[processFile] Hash : ${hash.slice(0, 12)}… | précédent : ${prev ? prev.slice(0, 12) + '…' : '(vide)'} | force=${force}`)
+    log(`[processFile] Hash: ${hash.slice(0, 12)}… | previous: ${prev ? prev.slice(0, 12) + '…' : '(empty)'} | force=${force}`)
 
     if (!force && hash === prev) {
-      log(`[processFile] Contenu identique — aucune action.`)
+      log(`[processFile] Identical content — no action.`)
       win.webContents.send('sync-status', {
         status: 'watching',
-        message: 'Aucune nouvelle donnée (déjà synchronisé localement).',
+        message: 'No new data (already synced locally).',
       })
       return
     }
 
     const sessionCount = Array.isArray(payload.sessions) ? payload.sessions.length : '?'
-    const exportTimestamp: string = payload.timestamp ?? 'inconnu'
+    const exportTimestamp: string = payload.timestamp ?? 'unknown'
     const addonVersion: string = payload.version ?? '?'
     log(`[processFile] Payload → sessions: ${sessionCount} | timestamp: ${exportTimestamp} | addon: ${addonVersion}`)
 
@@ -327,14 +486,14 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
     const apiKey = getStoreValue('apiKey')
 
     if (!apiUrl) {
-      throw new Error("URL d'API invalide — doit commencer par http:// ou https://")
+      throw new Error("Invalid API URL — must start with http:// or https://")
     }
     if (!apiKey) {
-      throw new Error("Clé API manquante — renseignez-la dans la configuration.")
+      throw new Error("Missing API key — set it in the configuration.")
     }
 
     const endpoint = `${apiUrl}/api/loot-sessions`
-    log(`[processFile] Envoi POST ${endpoint} ...`)
+    log(`[processFile] Sending POST ${endpoint} ...`)
 
     const res = await axios.post(endpoint, payload, {
       headers: {
@@ -344,13 +503,13 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
       timeout: 30000,
     })
 
-    log(`[processFile] Réponse serveur : HTTP ${res.status} → ${JSON.stringify(res.data).slice(0, 200)}`)
+    log(`[processFile] Server response: HTTP ${res.status} → ${JSON.stringify(res.data).slice(0, 200)}`)
 
     const contentType = res.headers?.['content-type'] ?? ''
     if (!contentType.includes('application/json') || typeof res.data !== 'object' || res.data === null) {
       throw new Error(
-        `Le serveur a répondu avec du HTML au lieu de JSON (HTTP ${res.status}).\n` +
-        `Le middleware bloque peut-être la requête — vérifiez la configuration du serveur.`
+        `The server responded with HTML instead of JSON (HTTP ${res.status}).\n` +
+        `The middleware may be blocking the request — check the server configuration.`
       )
     }
 
@@ -361,17 +520,17 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
       setStoreValue('lastSync', time)
 
       if (isDuplicate) {
-        log(`[processFile] ⚠️ DOUBLON — export déjà connu du serveur.`)
+        log(`[processFile] ⚠️ DUPLICATE — export already known by the server.`)
         win.webContents.send('sync-status', {
           status: 'duplicate',
-          message: `Déjà synchronisé (${sessionCount} vote(s) — doublon côté serveur)`,
+          message: `Already synced (${sessionCount} vote(s) — duplicate on the server)`,
           time, sessionCount, exportTimestamp, duplicate: true,
         })
       } else {
-        log(`[processFile] ✅ Synchronisation réussie ! ${sessionCount} session(s).`)
+        log(`[processFile] ✅ Sync successful! ${sessionCount} session(s).`)
         win.webContents.send('sync-status', {
           status: 'success',
-          message: `${sessionCount} vote(s) synchronisé(s)`,
+          message: `${sessionCount} vote(s) synced`,
           time, sessionCount, exportTimestamp, duplicate: false,
         })
       }
@@ -381,10 +540,10 @@ async function processFile(filePath: string, win: BrowserWindow, force = false) 
 
   } catch (error: any) {
     const errMsg = error?.response?.data?.message ?? error?.response?.data?.error ?? error.message ?? String(error)
-    log(`[processFile] ❌ Erreur : ${errMsg}`)
+    log(`[processFile] ❌ Error: ${errMsg}`)
     win.webContents.send('sync-status', {
       status: 'error',
-      message: `Erreur: ${errMsg}`,
+      message: `Error: ${errMsg}`,
     })
   } finally {
     inFlight.delete(filePath)
