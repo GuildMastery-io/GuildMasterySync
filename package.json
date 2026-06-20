@@ -1,6 +1,6 @@
 {
   "name": "guildmasterysync",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Windows companion app that auto-syncs RCLootCouncil_GuildMastery addon data to the GuildMastery web app.",
   "main": "dist-electron/main.js",
   "type": "commonjs",
