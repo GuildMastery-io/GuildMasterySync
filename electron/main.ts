@@ -4,6 +4,12 @@ import { store } from './store'
 import { startWatching, stopWatching, forceSync, testConnection } from './watcher'
 import { initUpdater, checkForUpdates, quitAndInstallUpdate, getUpdateStatus, stopUpdater } from './updater'
 
+// Force Electron's net stack (used by electron-updater) to HTTP/1.1. Some
+// networks / GitHub edge nodes reset HTTP/2 streams with
+// ERR_HTTP2_SERVER_REFUSED_STREAM when fetching latest.yml / the installer.
+// Must be set before app is ready. Only affects Chromium net, not axios/Node.
+app.commandLine.appendSwitch('disable-http2')
+
 process.env.DIST = path.join(__dirname, '../dist')
 process.env.VITE_PUBLIC = app.isPackaged ? process.env.DIST : path.join(process.env.DIST, '../public')
 
