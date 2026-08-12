@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import * as path from 'path'
 import { store } from './store'
 import { startWatching, stopWatching, forceSync, testConnection } from './watcher'
+import { initUpdater, checkForUpdates, quitAndInstallUpdate, getUpdateStatus, stopUpdater } from './updater'
 
 process.env.DIST = path.join(__dirname, '../dist')
 process.env.VITE_PUBLIC = app.isPackaged ? process.env.DIST : path.join(process.env.DIST, '../public')
@@ -78,12 +79,19 @@ function createWindow() {
     testConnection(apiUrl, apiKey)
   )
 
+  // ── Auto-update ──────────────────────────────────────────────
+  ipcMain.handle('get-app-version', () => app.getVersion())
+  ipcMain.handle('get-update-status', () => getUpdateStatus())
+  ipcMain.handle('check-for-updates', async () => { await checkForUpdates(true); return true })
+  ipcMain.handle('install-update', () => { quitAndInstallUpdate(); return true })
+
   // Auto-sync poll: 60s, no overlap (per-file mutex inside forceSync/processFile).
   autoSyncInterval = setInterval(() => {
     if (win && !win.isDestroyed()) void forceSync(win, false)
   }, 60 * 1000)
 
   startWatching(win)
+  initUpdater(win)
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
@@ -95,6 +103,7 @@ function createWindow() {
 
 function cleanup() {
   if (autoSyncInterval) { clearInterval(autoSyncInterval); autoSyncInterval = null }
+  stopUpdater()
   stopWatching()
 }
 

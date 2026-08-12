@@ -18,6 +18,7 @@ No more copy-pasting JSON exports. Install the app, point it at your WoW folder,
 - **Connection probe** — live indicator showing whether the server is reachable and the API key is valid (with the guild name displayed when verified).
 - **Server-side dedup** — the GuildMastery API rejects exports it already has, so duplicate uploads are harmless.
 - **Auto-start with Windows** — optional, toggled in the top bar.
+- **Automatic updates** — checks GitHub for a new release on launch and once a day, downloads it silently in the background, then shows a **Restart to install** button. No manual download, no reinstall.
 - **Live log panel** — see exactly what the watcher is doing, in real time.
 
 ## Install
@@ -48,6 +49,16 @@ guildmastery.io
 ```
 
 The app extracts the `syncPayload` field from the addon's SavedVariables, parses it as JSON, hashes it (sha1) to avoid re-uploading identical content, and `POST`s it to the GuildMastery API. The server detects duplicates by `(timestamp, sessions)` and replies with `{ duplicate: true }` if it already knows the payload.
+
+## Automatic updates
+
+The app uses [`electron-updater`](https://www.electron.build/auto-update) against the GitHub Releases feed that `electron-builder` publishes (each release ships the installer plus a `latest.yml` manifest).
+
+- On launch (after ~10s) and every 24h, the app checks for a newer published release.
+- If one is found it is downloaded in the background; the top bar then shows a **Restart to install** button (the version badge next to the title also lets you check manually at any time).
+- Clicking restart installs the update and relaunches. If you never click it, the update installs the next time you quit the app.
+
+> **Maintainer note:** `electron-updater` only sees **published** GitHub releases. The build config uses `releaseType: draft`, so after `npm run release` you must open the draft release on GitHub and click **Publish** before clients pick it up. The `version` in `package.json` must be bumped for a release to be considered newer.
 
 ## Build from source
 

@@ -13,6 +13,12 @@ export default defineConfig({
         vite: {
           build: {
             outDir: 'dist-electron',
+            rollupOptions: {
+              // electron-updater does dynamic requires + reads latest.yml at
+              // runtime — it must stay external and be loaded from node_modules
+              // (electron-builder ships production deps).
+              external: ['electron-updater'],
+            },
           },
         },
       },

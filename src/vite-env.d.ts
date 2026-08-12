@@ -22,6 +22,13 @@ export interface ConnectionResult {
   apiKey: { ok: boolean | null; message: string }
 }
 
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  version?: string
+  percent?: number
+  message?: string
+}
+
 export interface GuildMasterySyncApi {
   getSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<true>
@@ -30,6 +37,11 @@ export interface GuildMasterySyncApi {
   testConnection(args: { apiUrl: string; apiKey: string }): Promise<ConnectionResult>
   onSyncStatus(cb: (status: SyncStatus) => void): () => void
   onLog(cb: (line: string) => void): () => void
+  getAppVersion(): Promise<string>
+  getUpdateStatus(): Promise<UpdateStatus>
+  checkForUpdates(): Promise<true>
+  installUpdate(): Promise<true>
+  onUpdateStatus(cb: (status: UpdateStatus) => void): () => void
 }
 
 declare global {

@@ -6,7 +6,7 @@ import {
 import {
   IconRefresh, IconFolder, IconCheck, IconAlertTriangle,
   IconCloudUpload, IconSettings, IconLink, IconPlugConnected,
-  IconWifi, IconKey, IconClock,
+  IconWifi, IconKey, IconClock, IconDownload, IconArrowUpCircle,
 } from '@tabler/icons-react'
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -26,6 +26,13 @@ interface AppSettings {
   autoStart: boolean
   apiKey: string
   lastSync: string
+}
+
+interface UpdateStatus {
+  state: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  version?: string
+  percent?: number
+  message?: string
 }
 
 const SAVE_DEBOUNCE_MS = 600
@@ -54,6 +61,9 @@ export default function App() {
   const [checking, setChecking] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
   const logsEndRef = useRef<HTMLDivElement>(null)
+
+  const [appVersion, setAppVersion] = useState('')
+  const [update_, setUpdate] = useState<UpdateStatus>({ state: 'idle' })
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -120,9 +130,15 @@ export default function App() {
         return next.length > 200 ? next.slice(-200) : next
       })
     })
+
+    window.api.getAppVersion().then(setAppVersion)
+    window.api.getUpdateStatus().then(setUpdate)
+    const offUpdate = window.api.onUpdateStatus(setUpdate)
+
     return () => {
       offSync()
       offLog()
+      offUpdate()
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       if (checkTimerRef.current) clearTimeout(checkTimerRef.current)
     }
@@ -172,9 +188,46 @@ export default function App() {
             <Title order={5} c="white" fw={600} style={{ letterSpacing: '.5px' }}>
               GuildMastery Sync
             </Title>
+            {appVersion && (
+              <Tooltip
+                label={
+                  update_.state === 'checking'    ? 'Recherche de mises à jour…' :
+                  update_.state === 'downloading' ? `Téléchargement… ${update_.percent ?? 0}%` :
+                  update_.state === 'available'   ? `Version ${update_.version} disponible` :
+                  'Rechercher des mises à jour'
+                }
+                withArrow
+              >
+                <Badge
+                  className="app-no-drag"
+                  size="sm"
+                  variant="light"
+                  color={update_.state === 'error' ? 'orange' : 'gray'}
+                  style={{ cursor: 'pointer' }}
+                  leftSection={
+                    (update_.state === 'checking' || update_.state === 'downloading' || update_.state === 'available')
+                      ? <IconDownload size={11} /> : undefined
+                  }
+                  onClick={() => window.api.checkForUpdates()}
+                >
+                  v{appVersion}
+                </Badge>
+              </Tooltip>
+            )}
           </Group>
 
           <Group gap="md" className="app-no-drag">
+            {update_.state === 'downloaded' && (
+              <Button
+                size="xs"
+                color="teal"
+                variant="filled"
+                leftSection={<IconArrowUpCircle size={15} />}
+                onClick={() => window.api.installUpdate()}
+              >
+                Redémarrer pour installer {update_.version ? `v${update_.version}` : ''}
+              </Button>
+            )}
             <Group gap={6}>
               <Text size="xs" c="dimmed">Auto‑start</Text>
               <Switch
@@ -199,6 +252,41 @@ export default function App() {
             style={{ position: 'fixed', top: 56, right: 20, zIndex: 99 }}>
             ✓ Saved
           </Badge>
+        )}
+
+        {/* update banner */}
+        {(update_.state === 'downloaded' || update_.state === 'downloading') && (
+          <Card
+            bg={update_.state === 'downloaded' ? '#1c2d24' : '#25262b'}
+            radius="md" p="md" mb="lg"
+            style={{ border: `1px solid ${update_.state === 'downloaded' ? '#2f9e44' : '#2c2e33'}` }}
+          >
+            <Group justify="space-between" align="center">
+              <Group gap="sm">
+                <ThemeIcon color={update_.state === 'downloaded' ? 'teal' : 'gray'} variant="light" size="lg" radius="xl">
+                  {update_.state === 'downloaded' ? <IconArrowUpCircle size={18} /> : <IconDownload size={18} />}
+                </ThemeIcon>
+                <div>
+                  <Text c="white" fw={600} size="sm">
+                    {update_.state === 'downloaded'
+                      ? `Mise à jour ${update_.version ? `v${update_.version} ` : ''}prête`
+                      : `Téléchargement de la mise à jour… ${update_.percent ?? 0}%`}
+                  </Text>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    {update_.state === 'downloaded'
+                      ? "Redémarrez l'application pour l'installer. Vos réglages sont conservés."
+                      : 'La mise à jour sera installée au redémarrage.'}
+                  </Text>
+                </div>
+              </Group>
+              {update_.state === 'downloaded' && (
+                <Button color="teal" leftSection={<IconArrowUpCircle size={16} />}
+                  onClick={() => window.api.installUpdate()}>
+                  Redémarrer maintenant
+                </Button>
+              )}
+            </Group>
+          </Card>
         )}
 
         {/* ─── Status Banner ─── */}

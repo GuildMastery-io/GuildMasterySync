@@ -22,8 +22,16 @@ export interface ConnectionResult {
   apiKey: { ok: boolean | null; message: string }
 }
 
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  version?: string
+  percent?: number
+  message?: string
+}
+
 const SYNC_CHANNEL = 'sync-status'
 const LOG_CHANNEL = 'app-log'
+const UPDATE_CHANNEL = 'update-status'
 
 const api = {
   getSettings: (): Promise<AppSettings> =>
@@ -51,6 +59,25 @@ const api = {
     const listener = (_e: IpcRendererEvent, line: string) => cb(line)
     ipcRenderer.on(LOG_CHANNEL, listener)
     return () => ipcRenderer.off(LOG_CHANNEL, listener)
+  },
+
+  // ── Auto-update ──────────────────────────────────────────────
+  getAppVersion: (): Promise<string> =>
+    ipcRenderer.invoke('get-app-version'),
+
+  getUpdateStatus: (): Promise<UpdateStatus> =>
+    ipcRenderer.invoke('get-update-status'),
+
+  checkForUpdates: (): Promise<true> =>
+    ipcRenderer.invoke('check-for-updates'),
+
+  installUpdate: (): Promise<true> =>
+    ipcRenderer.invoke('install-update'),
+
+  onUpdateStatus: (cb: (status: UpdateStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, data: UpdateStatus) => cb(data)
+    ipcRenderer.on(UPDATE_CHANNEL, listener)
+    return () => ipcRenderer.off(UPDATE_CHANNEL, listener)
   },
 }
 
