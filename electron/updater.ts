@@ -28,11 +28,23 @@ export interface UpdateStatus {
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // once per day
 const INITIAL_DELAY_MS = 10 * 1000           // let the app settle after launch
 
+const MAX_CHECK_ATTEMPTS = 3
+const RETRY_BASE_MS = 2500
+
 let win: BrowserWindow | null = null
 let interval: NodeJS.Timeout | null = null
 let initialTimer: NodeJS.Timeout | null = null
 let lastStatus: UpdateStatus = { state: 'idle' }
 let downloaded = false
+/** True while checkForUpdates() owns the outcome (so its retries don't flash 'error' in the UI). */
+let checking = false
+
+const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/** GitHub/CDN hiccups that a retry usually clears (HTTP/2 stream resets, DNS, socket drops). */
+function isTransient(message: string): boolean {
+  return /ERR_HTTP2|REFUSED_STREAM|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|ECONNREFUSED|net::/i.test(message)
+}
 
 function log(msg: string) {
   const ts = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -77,8 +89,12 @@ function wireEvents() {
   })
 
   autoUpdater.on('error', (err) => {
-    log(`[update] Error: ${err == null ? 'unknown' : (err.message || String(err))}`)
-    send({ state: 'error', message: err?.message ?? String(err) })
+    const message = err == null ? 'unknown' : (err.message || String(err))
+    // While a check is in flight, checkForUpdates() handles retries/final state —
+    // don't let a transient stream reset flash 'error' in the UI.
+    if (checking) { log(`[update] (transient) ${message}`); return }
+    log(`[update] Error: ${message}`)
+    send({ state: 'error', message })
   })
 }
 
@@ -110,13 +126,28 @@ export async function checkForUpdates(manual: boolean): Promise<void> {
     send({ state: 'downloaded', version: lastStatus.version })
     return
   }
+
+  if (manual) log('[update] Manual check for updates…')
+  checking = true
   try {
-    if (manual) log('[update] Manual check for updates…')
-    await autoUpdater.checkForUpdates()
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    log(`[update] Check failed: ${message}`)
-    send({ state: 'error', message })
+    for (let attempt = 1; attempt <= MAX_CHECK_ATTEMPTS; attempt++) {
+      try {
+        await autoUpdater.checkForUpdates()
+        return // success — 'update-available' / 'update-not-available' drove the state
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (attempt < MAX_CHECK_ATTEMPTS && isTransient(message)) {
+          log(`[update] Check attempt ${attempt}/${MAX_CHECK_ATTEMPTS} failed (${message}) — retrying…`)
+          await delay(RETRY_BASE_MS * attempt)
+          continue
+        }
+        log(`[update] Check failed: ${message}`)
+        send({ state: 'error', message })
+        return
+      }
+    }
+  } finally {
+    checking = false
   }
 }
 
