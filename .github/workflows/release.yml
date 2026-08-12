@@ -23,10 +23,29 @@ jobs:
           node-version: 20
           cache: npm
 
+      # electron / electron-builder pull large binaries from GitHub during
+      # install and build; the runner's network occasionally drops the stream
+      # (socket hang up / EOF). Retry a few times before giving up.
       - name: Install dependencies
-        run: npm ci
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            npm ci
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::npm ci failed (attempt $i/3) — retrying in 15s…"
+            Start-Sleep -Seconds 15
+          }
+          Write-Host "::error::npm ci failed after 3 attempts"
+          exit 1
 
       - name: Build & publish (draft release)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            npm run release
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::release build failed (attempt $i/3) — retrying in 20s…"
+            Start-Sleep -Seconds 20
+          }
+          Write-Host "::error::release build failed after 3 attempts"
+          exit 1
