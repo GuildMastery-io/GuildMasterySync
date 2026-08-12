@@ -28,8 +28,8 @@ export interface UpdateStatus {
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // once per day
 const INITIAL_DELAY_MS = 10 * 1000           // let the app settle after launch
 
-const MAX_CHECK_ATTEMPTS = 3
-const RETRY_BASE_MS = 2500
+const MAX_CHECK_ATTEMPTS = 6
+const RETRY_BASE_MS = 2000
 
 let win: BrowserWindow | null = null
 let interval: NodeJS.Timeout | null = null
@@ -62,6 +62,9 @@ function send(status: UpdateStatus) {
 function wireEvents() {
   autoUpdater.autoDownload = true          // pull the installer in the background
   autoUpdater.autoInstallOnAppQuit = true  // fallback: install on next natural quit
+  // Canonical electron-updater ↔ GitHub mitigation: bypass any caching layer that
+  // can serve a stale/empty response (pairs with the disable-http2 switch in main.ts).
+  autoUpdater.requestHeaders = { 'Cache-Control': 'no-cache' }
   autoUpdater.logger = {
     info: (m: unknown) => log(`[update] ${String(m)}`),
     warn: (m: unknown) => log(`[update] ⚠ ${String(m)}`),
@@ -138,7 +141,7 @@ export async function checkForUpdates(manual: boolean): Promise<void> {
         const message = err instanceof Error ? err.message : String(err)
         if (attempt < MAX_CHECK_ATTEMPTS && isTransient(message)) {
           log(`[update] Check attempt ${attempt}/${MAX_CHECK_ATTEMPTS} failed (${message}) — retrying…`)
-          await delay(RETRY_BASE_MS * attempt)
+          await delay(Math.min(RETRY_BASE_MS * attempt, 5000))
           continue
         }
         log(`[update] Check failed: ${message}`)
