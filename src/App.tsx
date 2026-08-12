@@ -590,6 +590,25 @@ export default function App() {
           </Box>
         </Box>
 
+        {/* ─── Footer / version ─── */}
+        <Group justify="center" gap={8} mt="md" pb={4}>
+          <Text size="xs" c="dimmed">GuildMastery Sync</Text>
+          {appVersion && <Text size="xs" c="dimmed" fw={700}>v{appVersion}</Text>}
+          <Text size="xs" c="dimmed">·</Text>
+          <Text
+            size="xs"
+            c={update_.state === 'downloaded' ? 'teal' : 'dimmed'}
+            style={{ cursor: 'pointer', textDecoration: 'underline' }}
+            onClick={() => window.api.checkForUpdates()}
+          >
+            {update_.state === 'checking'      ? 'Checking for updates…' :
+             update_.state === 'downloading'   ? `Downloading… ${update_.percent ?? 0}%` :
+             update_.state === 'downloaded'    ? 'Update ready — restart' :
+             update_.state === 'not-available' ? 'Up to date' :
+                                                 'Check for updates'}
+          </Text>
+        </Group>
+
       </Box>
     </Box>
   )
