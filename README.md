@@ -17,6 +17,7 @@ No more copy-pasting JSON exports. Install the app, point it at your WoW folder,
 - **Manual refresh** — one-click resync button if you want to force a push.
 - **Connection probe** — live indicator showing whether the server is reachable and the API key is valid (with the guild name displayed when verified).
 - **Server-side dedup** — the GuildMastery API rejects exports it already has, so duplicate uploads are harmless.
+- **Master Looter authority + two-way sync** — when several guild members run the app, each session is owned by the Master Looter who ran it; the ML's copy wins, so members no longer overwrite each other's votes. The ML's canonical data is pulled back and written to each member's addon (between play sessions, while WoW is closed) so everyone's `/gm history` converges. Requires the matching addon version.
 - **Auto-start with Windows** — optional, toggled in the top bar.
 - **Automatic updates** — checks GitHub for a new release on launch and once a day, downloads it silently in the background, then shows a **Restart to install** button. No manual download, no reinstall.
 - **Live log panel** — see exactly what the watcher is doing, in real time.

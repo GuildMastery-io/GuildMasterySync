@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import * as path from 'path'
 import { store } from './store'
 import { startWatching, stopWatching, forceSync, testConnection } from './watcher'
+import { flushPendingInbox } from './inbox'
 import { initUpdater, checkForUpdates, quitAndInstallUpdate, getUpdateStatus, stopUpdater } from './updater'
 
 // Force Electron's net stack (used by electron-updater) to HTTP/1.1. Some
@@ -17,6 +18,14 @@ let win: BrowserWindow | null = null
 let autoSyncInterval: NodeJS.Timeout | null = null
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
+
+/** Logger for the inbox flush poller — mirrors the watcher's app-log format. */
+function inboxLog(msg: string) {
+  const ts = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const line = `[${ts}] ${msg}`
+  console.log(line)
+  try { win?.webContents.send('app-log', line) } catch { /* renderer gone */ }
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -94,6 +103,8 @@ function createWindow() {
   // Auto-sync poll: 60s, no overlap (per-file mutex inside forceSync/processFile).
   autoSyncInterval = setInterval(() => {
     if (win && !win.isDestroyed()) void forceSync(win, false)
+    // Retry writing pending canonical entries to the addon inbox once WoW closes.
+    void flushPendingInbox(inboxLog)
   }, 60 * 1000)
 
   startWatching(win)
