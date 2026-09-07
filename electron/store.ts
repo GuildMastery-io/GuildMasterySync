@@ -16,6 +16,12 @@ export interface AppSettings {
   lastSync: string;
   /** Survives restarts → avoids re-uploading the whole history. */
   syncState: Record<string, FileSyncState>;
+  /**
+   * Canonical entries pulled from the server, waiting to be written to the
+   * addon inbox (key = SavedVariables file path). Flushed only when WoW is
+   * closed. Survives restarts so a pending pull is never lost.
+   */
+  inboxPending: Record<string, unknown[]>;
 }
 
 const schema = {
@@ -40,6 +46,11 @@ const schema = {
     default: '',
   },
   syncState: {
+    type: 'object',
+    default: {},
+    additionalProperties: true,
+  },
+  inboxPending: {
     type: 'object',
     default: {},
     additionalProperties: true,

@@ -5,6 +5,7 @@ import chokidar, { FSWatcher } from 'chokidar'
 import axios from 'axios'
 import { getStoreValue, setStoreValue, type FileSyncState } from './store'
 import { pruneOldSessions, RETENTION_DAYS } from './retention'
+import { enqueueInbox, flushPendingInbox } from './inbox'
 import { BrowserWindow } from 'electron'
 
 let watcher: FSWatcher | null = null
@@ -159,6 +160,7 @@ async function processV2(filePath: string, win: BrowserWindow, payload: any, for
     allState[filePath] = { ackedHashes, lastReconcile: Date.now() }
     setStoreValue('syncState', allState)
     finishOk(win, sessions.length, payload, drift ? 'reconcile' : 'noop')
+    await pullAndEnqueue(apiUrl, apiKey, filePath, current, log)
     return
   }
 
@@ -188,6 +190,38 @@ async function processV2(filePath: string, win: BrowserWindow, payload: any, for
   allState[filePath] = { ackedHashes, lastReconcile: st.lastReconcile }
   setStoreValue('syncState', allState)
   finishOk(win, changed.length, payload, 'delta')
+  await pullAndEnqueue(apiUrl, apiKey, filePath, current, log)
+}
+
+/**
+ * Return channel (v3): after pushing, pull the guild's canonical entries the
+ * client is missing/outdated on (the Master Looter's authoritative versions) and
+ * queue them for the addon inbox. Non-fatal: a pull failure never breaks the push.
+ */
+async function pullAndEnqueue(
+  apiUrl: string,
+  apiKey: string,
+  filePath: string,
+  current: Record<string, { hash: string; session: V2Session }>,
+  log: (msg: string) => void,
+) {
+  try {
+    const have: Record<string, string> = {}
+    for (const [id, { hash }] of Object.entries(current)) have[id] = hash
+    const res = await axios.post(
+      `${apiUrl}/api/loot-sessions/canonical`,
+      { have },
+      { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, timeout: 30000 },
+    )
+    const entries = Array.isArray(res.data?.entries) ? res.data.entries : []
+    if (entries.length > 0) {
+      enqueueInbox(filePath, entries)
+      log(`[pull] ${entries.length} canonical entry(ies) from the Master Looter queued for the addon.`)
+    }
+  } catch (e: any) {
+    log(`[pull] Canonical pull skipped (non-fatal): ${e?.message ?? e}`)
+  }
+  await flushPendingInbox(log)
 }
 
 /** Ensures an axios response is application JSON (guards against HTML middleware). */
