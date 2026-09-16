@@ -142,24 +142,41 @@ async function processV2(filePath: string, win: BrowserWindow, payload: any, for
       }
     }
 
+    let pushOk = true
     if (drift) {
       log(`[processV2] Drift detected → full reconcile (is_full_sync).`)
-      const res = await axios.post(
-        `${apiUrl}/api/loot-sessions`,
-        { ...payload, version: '2', is_full_sync: true },
-        { headers, timeout: 30000 },
-      )
-      assertJson(res)
+      try {
+        const res = await axios.post(
+          `${apiUrl}/api/loot-sessions`,
+          { ...payload, version: '2', is_full_sync: true },
+          { headers, timeout: 30000 },
+        )
+        assertJson(res)
+      } catch (e: any) {
+        // A rejected push must NOT block the return channel: the pull only
+        // needs our local manifest, so a member with one un-syncable entry
+        // still receives the Master Looter's newer sessions. Keep the old
+        // state so the next run retries the push.
+        pushOk = false
+        log(`[processV2] ⚠️ Reconcile push failed (non-fatal, will retry): ${e?.message ?? e}`)
+      }
     } else {
       log(`[processV2] No drift — already in sync with the server.`)
     }
 
-    // State aligned to the current local state.
-    const ackedHashes: Record<string, string> = {}
-    for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
-    allState[filePath] = { ackedHashes, lastReconcile: Date.now() }
-    setStoreValue('syncState', allState)
-    finishOk(win, sessions.length, payload, drift ? 'reconcile' : 'noop')
+    if (pushOk) {
+      // State aligned to the current local state (only on a successful push).
+      const ackedHashes: Record<string, string> = {}
+      for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+      allState[filePath] = { ackedHashes, lastReconcile: Date.now() }
+      setStoreValue('syncState', allState)
+      finishOk(win, sessions.length, payload, drift ? 'reconcile' : 'noop')
+    } else {
+      win.webContents.send('sync-status', {
+        status: 'error',
+        message: 'Upload failed — will retry. Still checking for incoming updates.',
+      })
+    }
     await pullAndEnqueue(apiUrl, apiKey, filePath, current, log)
     return
   }
@@ -177,19 +194,34 @@ async function processV2(filePath: string, win: BrowserWindow, payload: any, for
   }
 
   log(`[processV2] Delta: ${changed.length}/${sessions.length} changed entry(ies) → upsert.`)
-  const res = await axios.post(
-    `${apiUrl}/api/loot-sessions`,
-    { version: '2', timestamp: payload.timestamp, is_full_sync: false, sessions: changed },
-    { headers, timeout: 30000 },
-  )
-  assertJson(res)
+  let pushOk = true
+  try {
+    const res = await axios.post(
+      `${apiUrl}/api/loot-sessions`,
+      { version: '2', timestamp: payload.timestamp, is_full_sync: false, sessions: changed },
+      { headers, timeout: 30000 },
+    )
+    assertJson(res)
+  } catch (e: any) {
+    // Non-fatal (see reconcile branch): keep the old ack state so the delta is
+    // retried next run, but still pull the return channel below.
+    pushOk = false
+    log(`[processV2] ⚠️ Delta push failed (non-fatal, will retry): ${e?.message ?? e}`)
+  }
 
-  // Acknowledge sent entries + drop ids that disappeared locally (180d prune).
-  const ackedHashes: Record<string, string> = {}
-  for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
-  allState[filePath] = { ackedHashes, lastReconcile: st.lastReconcile }
-  setStoreValue('syncState', allState)
-  finishOk(win, changed.length, payload, 'delta')
+  if (pushOk) {
+    // Acknowledge sent entries + drop ids that disappeared locally (180d prune).
+    const ackedHashes: Record<string, string> = {}
+    for (const [id, { hash }] of Object.entries(current)) ackedHashes[id] = hash
+    allState[filePath] = { ackedHashes, lastReconcile: st.lastReconcile }
+    setStoreValue('syncState', allState)
+    finishOk(win, changed.length, payload, 'delta')
+  } else {
+    win.webContents.send('sync-status', {
+      status: 'error',
+      message: 'Upload failed — will retry. Still checking for incoming updates.',
+    })
+  }
   await pullAndEnqueue(apiUrl, apiKey, filePath, current, log)
 }
 
